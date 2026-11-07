@@ -1,10 +1,11 @@
 # 🛡️ Docker Anonymous: Minimal Node.js Stealth Runtime
 
+[![CI](https://github.com/gkosarintsev/docker-anonymous/actions/workflows/ci.yml/badge.svg)](https://github.com/gkosarintsev/docker-anonymous/actions/workflows/ci.yml)
 [![Docker Compose](https://img.shields.io/badge/Docker%20Compose-v2%2B-blue.svg?logo=docker)](https://www.docker.com/)
 [![Node.js](https://img.shields.io/badge/Node.js-v22%20LTS-green.svg?logo=node.js)](https://nodejs.org/)
 [![Cloudflare WARP](https://img.shields.io/badge/Proxy-Cloudflare%20WARP-orange.svg?logo=cloudflare)](https://developers.cloudflare.com/warp-client/)
-[![Anti--Fingerprint](https://img.shields.io/badge/Anti--Fingerprint-Node.js%20Native-purple.svg)](#-защита-от-fingerprint-без-эмуляции-браузера)
-[![Security](https://img.shields.io/badge/Kill--Switch-Fail--Closed-red.svg)](#-механизм-fail-closed-kill-switch)
+[![Anti-Fingerprint](https://img.shields.io/badge/Anti--Fingerprint-Node.js%20Native-purple.svg)](#-защита-от-fingerprint-без-эмуляции-браузера)
+[![Kill-Switch](https://img.shields.io/badge/Kill--Switch-Fail--Closed-red.svg)](#-механизм-fail-closed-kill-switch)
 
 Минималистичное консольное приложение на **Node.js (TypeScript)** в изолированном **Docker**-окружении с подменой IP-адреса через **Cloudflare WARP** и аппаратной защитой от фингерпринтинга (TLS JA3/JA4 и HTTP).
 
@@ -90,8 +91,8 @@
 1. **Ротация TLS ClientHello (JA3 / JA4)**:
    - Внешний скрипт `generate-env.sh` формирует псевдослучайную комбинацию и порядок криптографических шифров из пула стойких шифров OpenSSL:
      `ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:...`
-   - Набор передается в Node.js через флаг окружения `NODE_OPTIONS=--tls-cipher-list=...`.
-   - В результате внешние анализаторы (например, `tls.peet.ws`) фиксируют смену сигнатур **JA3** и **JA4**.
+   - Набор передаётся в Node.js через переменную окружения `NODE_OPTIONS=--tls-cipher-list=...`, которая читается **бинарём `node` при старте процесса** — до выполнения какого-либо JavaScript кода. Это runtime-параметр, а не compile-time: скомпилированный TypeScript ничего не знает о шифрах; ими управляет внешнее окружение.
+   - В результате внешние анализаторы (например, `tls.peet.ws`) фиксируют смену сигнатур **JA3** и **JA4** после каждого `reinstall.sh`, не требуя пересборки образа.
 2. **Ротация идентификаторов бэкенд-клиентов**:
    - `User-Agent` генерируется из набора популярных серверных HTTP-клиентов (`axios`, `node-fetch`, `got`, `undici`, `Node.js native`).
 3. **Смена Machine ID**:
@@ -120,7 +121,7 @@
 ### 1. Первоначальная установка
 
 ```bash
-git clone https://github.com/your-username/docker-anonymous.git
+git clone https://github.com/gkosarintsev/docker-anonymous.git
 cd docker-anonymous
 
 chmod +x *.sh scripts/*.sh warp/*.sh
@@ -198,6 +199,10 @@ chmod +x *.sh scripts/*.sh warp/*.sh
    - Убеждается, что запрос завершился **ошибкой**, и утечки реального IP хоста не произошло.
    - Автоматически восстанавливает работу прокси.
 
+### GitHub Actions CI
+
+Те же самые тесты автоматически запускаются в [GitHub Actions](.github/workflows/ci.yml) при каждом `push` и `pull_request` в `main`. Раннер `ubuntu-latest` имеет полный доступ в интернет и поддерживает Docker-in-Docker, поэтому тесты с реальным WARP-туннелем проходят в CI без дополнительной настройки.
+
 ### Пример вывода тестов:
 ```text
 ==========================================================
@@ -239,14 +244,19 @@ chmod +x *.sh scripts/*.sh warp/*.sh
 
 ```text
 docker-anonymous/
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # GitHub Actions: тесты с реальным WARP-туннелем в CI
 ├── Dockerfile                  # Многоэтапная (multi-stage) сборка Node.js runner на Alpine
 ├── docker-compose.yml          # Спецификация сервисов (warp-proxy + node-app)
 ├── package.json                # Зависимости проекта (undici, typescript, @types/node)
+├── package-lock.json           # Lockfile для воспроизводимых сборок
 ├── tsconfig.json               # Конфигурация компилятора TypeScript (ES2022)
 ├── install.sh                  # Скрипт первоначальной установки
 ├── reinstall.sh                # Скрипт переустановки (полная перекомпиляция + ротация IP и FP)
 ├── run.sh                      # Скрипт повторного запуска без сброса данных
 ├── test.sh                     # Автотест смены IP, отпечатка и kill-switch
+├── .env.example                # Пример формата .env (без реальных значений)
 ├── .gitignore                  # Исключения git (node_modules, dist, .env)
 ├── src/
 │   └── index.ts                # Минималистичное Node.js приложение (~60 строк)

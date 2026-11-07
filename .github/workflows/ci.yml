@@ -21,54 +21,69 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Buildx enables layer caching — speeds up repeat CI runs significantly
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ─────────────────────────────────────────────
-      # SETUP: build images and generate .env
-      # ─────────────────────────────────────────────
+      # ─────────────────────────────────────────────────────────────────────
+      # SETUP
+      # ─────────────────────────────────────────────────────────────────────
       - name: Generate stealth environment profile
         run: bash scripts/generate-env.sh
 
-      - name: Build Docker images
-        run: docker compose build --progress=plain
-
-      # ─────────────────────────────────────────────
-      # TEST 1 — WARP connectivity & real IP check
-      # ─────────────────────────────────────────────
-      - name: "[TEST 1/3] Start WARP proxy and verify connectivity"
-        id: test1
+      - name: Build Docker images (with layer cache)
         run: |
-          echo "Starting warp-proxy (waiting for healthy state, up to 180s)..."
-          docker compose up warp-proxy -d
+          docker compose build --progress=plain \
+            --build-arg BUILDKIT_INLINE_CACHE=1
 
-          # Poll the healthcheck manually — compose --wait relies on Dockerfile HEALTHCHECK
-          # and timeout is a shutdown timeout, not a wait timeout. Poll ourselves.
-          DEADLINE=$(($(date +%s) + 180))
-          until docker inspect warp-proxy-service --format '{{.State.Health.Status}}' 2>/dev/null | grep -q "^healthy$"; do
+      # ─────────────────────────────────────────────────────────────────────
+      # SHARED HELPER — inline wait-for-warp logic
+      # (Avoids depending on scripts/ path resolution inside composite steps)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Define wait-for-warp helper
+        run: |
+          cat > /tmp/wait-for-warp.sh << 'SCRIPT'
+          #!/usr/bin/env bash
+          TIMEOUT="${1:-180}"
+          DEADLINE=$(($(date +%s) + TIMEOUT))
+          until docker inspect warp-proxy-service \
+                  --format '{{.State.Health.Status}}' 2>/dev/null \
+                | grep -q "^healthy$"; do
             if [ "$(date +%s)" -gt "$DEADLINE" ]; then
-              echo "❌ TIMEOUT: warp-proxy did not become healthy in 180s"
-              echo "--- warp-proxy logs ---"
-              docker logs warp-proxy-service --tail 50
+              echo "❌ TIMEOUT: warp-proxy not healthy after ${TIMEOUT}s"
+              docker logs warp-proxy-service --tail 50 2>/dev/null || true
               exit 1
             fi
-            STATUS=$(docker inspect warp-proxy-service --format '{{.State.Health.Status}}' 2>/dev/null || echo "starting")
-            echo "  Waiting for healthy... current: $STATUS"
+            STATUS=$(docker inspect warp-proxy-service \
+                       --format '{{.State.Health.Status}}' 2>/dev/null \
+                     || echo "absent")
+            echo "    ... waiting (${STATUS})"
             sleep 5
           done
-          echo "WARP proxy is healthy. Capturing first IP..."
+          echo "✓ WARP proxy is healthy."
+          SCRIPT
+          chmod +x /tmp/wait-for-warp.sh
+
+      # ─────────────────────────────────────────────────────────────────────
+      # TEST 1 — WARP connectivity & real IP check
+      # ─────────────────────────────────────────────────────────────────────
+      - name: "[TEST 1/3] Start WARP proxy and verify connectivity"
+        run: |
+          echo "Starting warp-proxy..."
+          docker compose up warp-proxy -d
+          bash /tmp/wait-for-warp.sh 180
 
           OUT=$(docker run --rm \
             --network=container:warp-proxy-service \
             --env-file .env \
             docker-anonymous-app:latest --json 2>/dev/null || true)
-          echo "Raw output: $OUT"
+          echo "Output: $OUT"
 
           IP=$(echo "$OUT"     | grep -o '"ip": *"[^"]*"'          | head -n1 | cut -d'"' -f4 || true)
-          WARP=$(echo "$OUT"   | grep -o '"warp": *[^,}]*'         | head -n1 | awk '{print $2}' || true)
           JA4=$(echo "$OUT"    | grep -o '"ja4": *"[^"]*"'         | head -n1 | cut -d'"' -f4 || true)
           UA=$(echo "$OUT"     | grep -o '"userAgent": *"[^"]*"'   | head -n1 | cut -d'"' -f4 || true)
           CIPHERS=$(echo "$OUT" | grep -o '"nodeOptions": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)
+          WARP_ON=$(echo "$OUT" | grep -o '"warp": *[^,}]*'         | head -n1 | awk '{print $2}' || true)
 
           echo "IP_BASELINE=$IP"           >> "$GITHUB_ENV"
           echo "JA4_BASELINE=$JA4"         >> "$GITHUB_ENV"
@@ -76,119 +91,105 @@ jobs:
           echo "CIPHERS_BASELINE=$CIPHERS" >> "$GITHUB_ENV"
 
           if [ -z "$IP" ] || [ "$IP" = "unknown" ]; then
-            echo "❌ FAIL: Could not obtain public IP from WARP"
+            echo "❌ FAIL: No public IP obtained from WARP"
             docker logs warp-proxy-service --tail 30
             exit 1
           fi
-          echo "✅ PASS: WARP is active. IP=$IP  warp=$WARP  JA4=$JA4"
+          echo "✅ PASS: WARP active — IP=$IP  warp=$WARP_ON  JA4=$JA4"
 
-      # ─────────────────────────────────────────────
-      # TEST 2 — Fingerprint rotation after reinstall
-      # ─────────────────────────────────────────────
+      # ─────────────────────────────────────────────────────────────────────
+      # TEST 2 — Fingerprint rotation after full reinstall
+      # ─────────────────────────────────────────────────────────────────────
       - name: "[TEST 2/3] Rotate WARP identity and TLS fingerprint"
         run: |
-          echo "Stopping stack and wiping volumes..."
+          echo "Wiping stack and volumes..."
           docker compose down -v
 
-          echo "Regenerating stealth profile (new cipher order + new UA)..."
+          echo "Generating new stealth profile..."
           bash scripts/generate-env.sh
 
-          echo "Rebuilding images (no-cache to force fresh TS compile)..."
+          echo "Rebuilding images..."
           docker compose build --no-cache --progress=plain
 
           echo "Starting WARP with fresh identity..."
           docker compose up warp-proxy -d
-
-          DEADLINE=$(($(date +%s) + 180))
-          until docker inspect warp-proxy-service --format '{{.State.Health.Status}}' 2>/dev/null | grep -q "^healthy$"; do
-            if [ "$(date +%s)" -gt "$DEADLINE" ]; then
-              echo "❌ TIMEOUT: warp-proxy did not become healthy after reinstall"
-              docker logs warp-proxy-service --tail 50
-              exit 1
-            fi
-            STATUS=$(docker inspect warp-proxy-service --format '{{.State.Health.Status}}' 2>/dev/null || echo "starting")
-            echo "  Waiting... current: $STATUS"
-            sleep 5
-          done
+          bash /tmp/wait-for-warp.sh 180
 
           OUT=$(docker run --rm \
             --network=container:warp-proxy-service \
             --env-file .env \
             docker-anonymous-app:latest --json 2>/dev/null || true)
-          echo "Raw output: $OUT"
+          echo "Output: $OUT"
 
           IP_NEW=$(echo "$OUT"      | grep -o '"ip": *"[^"]*"'          | head -n1 | cut -d'"' -f4 || true)
           JA4_NEW=$(echo "$OUT"     | grep -o '"ja4": *"[^"]*"'         | head -n1 | cut -d'"' -f4 || true)
           UA_NEW=$(echo "$OUT"      | grep -o '"userAgent": *"[^"]*"'   | head -n1 | cut -d'"' -f4 || true)
           CIPHERS_NEW=$(echo "$OUT" | grep -o '"nodeOptions": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)
 
+          echo ""
           echo "--- ROTATION RESULTS ---"
-          echo "  IP:      $IP_BASELINE -> $IP_NEW"
-          echo "  JA4:     $JA4_BASELINE -> $JA4_NEW"
-          echo "  UA:      $UA_BASELINE -> $UA_NEW"
-          echo "  Ciphers: (old) -> $CIPHERS_NEW"
+          echo "  IP:      $IP_BASELINE  →  $IP_NEW"
+          echo "  JA4:     $JA4_BASELINE  →  $JA4_NEW"
+          echo "  UA:      $UA_BASELINE  →  $UA_NEW"
+          echo ""
 
           FAILED=0
 
-          # IP check (advisory — same Cloudflare edge pool is acceptable)
+          # IP rotation (advisory — same Cloudflare edge PoP is acceptable)
           if [ "$IP_BASELINE" != "$IP_NEW" ] && [ -n "$IP_NEW" ] && [ "$IP_NEW" != "unknown" ]; then
-            echo "✅ PASS: IP changed ($IP_BASELINE -> $IP_NEW)"
+            echo "✅ PASS: IP changed ($IP_BASELINE → $IP_NEW)"
           else
-            echo "⚠️  NOTE: Same Cloudflare edge IP ($IP_NEW). WARP identity was rotated (new X25519 key registered)."
+            echo "⚠️  NOTE: Same Cloudflare edge IP ($IP_NEW). New X25519 credentials were registered."
           fi
 
-          # Fingerprint MUST change — this is the primary assertion
+          # TLS fingerprint MUST change — primary assertion
           if [ "$CIPHERS_BASELINE" != "$CIPHERS_NEW" ] || [ "$JA4_BASELINE" != "$JA4_NEW" ]; then
-            echo "✅ PASS: TLS fingerprint rotated (JA4: $JA4_BASELINE -> $JA4_NEW)"
+            echo "✅ PASS: TLS fingerprint rotated (JA4: $JA4_BASELINE → $JA4_NEW)"
           else
             echo "❌ FAIL: TLS fingerprint did NOT rotate after reinstall!"
             FAILED=1
           fi
 
-          # User-Agent must look like a real Node.js client
-          if [[ "$UA_NEW" == *"Node.js"* ]] || [[ "$UA_NEW" == *"axios"* ]] || \
-             [[ "$UA_NEW" == *"undici"* ]] || [[ "$UA_NEW" == *"got"* ]]    || \
+          # User-Agent must look like a real Node.js library
+          if [[ "$UA_NEW" == *"Node.js"* ]] || [[ "$UA_NEW" == *"axios"* ]]     || \
+             [[ "$UA_NEW" == *"undici"* ]]  || [[ "$UA_NEW" == *"got"* ]]       || \
              [[ "$UA_NEW" == *"node-fetch"* ]]; then
             echo "✅ PASS: User-Agent is authentic Node.js client: $UA_NEW"
           else
-            echo "❌ FAIL: Unexpected User-Agent format: '$UA_NEW'"
+            echo "❌ FAIL: Unexpected User-Agent: '$UA_NEW'"
             FAILED=1
           fi
 
           exit $FAILED
 
-      # ─────────────────────────────────────────────
+      # ─────────────────────────────────────────────────────────────────────
       # TEST 3 — Fail-closed / Kill-switch
-      # Shared network namespace trick: when warp-proxy is STOPPED (not removed),
-      # its network namespace still exists but port 9091 is gone → connection refused.
-      # ─────────────────────────────────────────────
+      # warp-proxy is STOPPED (not removed) → its network namespace still
+      # exists but port 9091 is gone → node-app gets ECONNREFUSED → exit 1.
+      # ─────────────────────────────────────────────────────────────────────
       - name: "[TEST 3/3] Kill-switch — no host IP leak when WARP is down"
         run: |
-          echo "Stopping warp-proxy (port 9091 disappears, namespace kept)..."
+          echo "Stopping warp-proxy (port 9091 disappears)..."
           docker compose stop warp-proxy
 
           echo "Attempting request with proxy down — MUST fail..."
-          # node-app shares warp-proxy network namespace (network_mode: service:warp-proxy)
-          # With stopped warp-proxy its namespace still exists; proxy port is gone → ECONNREFUSED
           if docker run --rm \
               --network=container:warp-proxy-service \
               --env-file .env \
               docker-anonymous-app:latest 2>/dev/null; then
-            echo "❌ FAIL: Request succeeded with WARP proxy stopped! Host IP may have leaked."
+            echo "❌ FAIL: Request succeeded with WARP stopped — host IP may have leaked!"
             exit 1
           else
-            echo "✅ PASS: Request blocked (exit code $?). Fail-closed kill-switch confirmed."
+            echo "✅ PASS: Request blocked. Fail-closed kill-switch confirmed."
             echo "         Host IP was NOT exposed to the internet."
           fi
 
-      # ─────────────────────────────────────────────
+      # ─────────────────────────────────────────────────────────────────────
       # CLEANUP
-      # ─────────────────────────────────────────────
+      # ─────────────────────────────────────────────────────────────────────
       - name: Cleanup
         if: always()
-        run: |
-          docker compose down -v --remove-orphans 2>/dev/null || true
-          docker system prune -f 2>/dev/null || true
+        run: docker compose down -v --remove-orphans 2>/dev/null || true
 
       - name: Dump warp-proxy logs on failure
         if: failure()

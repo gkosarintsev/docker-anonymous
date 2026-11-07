@@ -179,5 +179,31 @@ else
     }' > "$CONFIG_FILE"
 fi
 
+# Strict network-level fail-closed kill-switch via iptables
+if command -v iptables >/dev/null 2>&1; then
+    echo "[warp] Activating kernel-level fail-closed firewall (iptables)..."
+    iptables -F OUTPUT 2>/dev/null || true
+    # 1. Allow all loopback traffic
+    iptables -A OUTPUT -o lo -j ACCEPT
+    # 2. Allow established and related connections
+    iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    # 3. Allow DNS queries to Docker daemon
+    iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+    # 4. Allow WireGuard UDP traffic to WARP endpoints
+    iptables -A OUTPUT -p udp -m multiport --dports 2408,500,1701,4500 -j ACCEPT
+    # 5. Allow Cloudflare API registration ranges
+    iptables -A OUTPUT -d 162.159.192.0/24 -j ACCEPT
+    iptables -A OUTPUT -d 162.159.193.0/24 -j ACCEPT
+    iptables -A OUTPUT -d 162.159.195.0/24 -j ACCEPT
+    iptables -A OUTPUT -d 188.114.96.0/24 -j ACCEPT
+    iptables -A OUTPUT -d 188.114.97.0/24 -j ACCEPT
+    iptables -A OUTPUT -d 188.114.98.0/24 -j ACCEPT
+    iptables -A OUTPUT -d 188.114.99.0/24 -j ACCEPT
+    # 6. STRICT FAIL-CLOSED: Drop all other direct outbound traffic from this network
+    iptables -A OUTPUT -j DROP
+    echo "[warp] Firewall active: direct WAN egress from container is strictly blocked."
+fi
+
 echo "[warp] Starting sing-box with Cloudflare WARP on port $NET_PORT..."
 exec sing-box -c "$CONFIG_FILE" run

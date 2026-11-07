@@ -45,7 +45,11 @@ SELECTED_UA="${USER_AGENTS[$((RANDOM % ${#USER_AGENTS[@]}))]}"
 # 3. Machine ID
 MACHINE_ID=$(openssl rand -hex 16)
 
-# 4. Write .env
+# 4. Cloudflare WARP Gateway Endpoint
+WARP_SERVER="${WARP_SERVER:-162.159.192.1}"
+WARP_PORT="2408"
+
+# 5. Write .env
 cat <<EOF > "$ENV_FILE"
 # Auto-generated Node.js Stealth Environment Profile
 HTTP_PROXY=http://127.0.0.1:9091
@@ -60,9 +64,13 @@ USER_AGENT=${SELECTED_UA}
 
 # System Identifier
 MACHINE_ID=${MACHINE_ID}
+
+# Cloudflare WARP Gateway Endpoint
+WARP_SERVER=${WARP_SERVER}
+WARP_PORT=${WARP_PORT}
 EOF
 
 echo "[env] Generated fresh environment profile in $ENV_FILE"
 echo "      Cipher list: ${SELECTED_CIPHERS}"
 echo "      User-Agent:  ${SELECTED_UA}"
-
+echo "      WARP Server: ${WARP_SERVER}:${WARP_PORT}"

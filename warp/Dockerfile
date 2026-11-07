@@ -1,5 +1,7 @@
 FROM ghcr.io/mon-ius/docker-warp-socks:v8
 
+RUN apk add --no-cache iptables ip6tables
+
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 

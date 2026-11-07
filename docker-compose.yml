@@ -10,9 +10,11 @@ services:
     restart: unless-stopped
     volumes:
       - warp-data:/etc/sing-box
+    cap_add:
+      - NET_ADMIN
     environment:
-      - WARP_SERVER=162.159.192.1
-      - WARP_PORT=2408
+      - WARP_SERVER=${WARP_SERVER:-162.159.192.1}
+      - WARP_PORT=${WARP_PORT:-2408}
       - NET_PORT=9091
       - WARP_MTU=1200
     healthcheck:

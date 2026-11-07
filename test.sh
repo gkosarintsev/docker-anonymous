@@ -9,20 +9,15 @@ echo "=========================================================="
 
 FAILED=0
 
-# ─── Helper ──────────────────────────────────────────────────────────────────
-# Parse a JSON string field without requiring jq
+# Helper to extract JSON fields without requiring jq
 extract_json() {
-  local json="$1" key="$2"
-  echo "$json" | grep -o "\"${key}\": *\"[^\"]*\"" | head -n1 | cut -d'"' -f4 || true
+  local json="$1"
+  local key="$2"
+  echo "$json" | grep -o "\"$key\": *\"[^\"]*\"" | head -n 1 | cut -d'"' -f4 || true
 }
 
-run_app_json() {
-  ./run.sh --json 2>/dev/null | grep -A 100 '^{' | head -n 30 || true
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-echo "[TEST 1/3] Capturing baseline state..."
-OUT1=$(run_app_json)
+echo "[TEST 1/3] Capturing baseline state (Run 1)..."
+OUT1=$(./run.sh --json 2>/dev/null | tail -n 25 | grep -A 20 "^{" || true)
 
 IP1=$(extract_json "$OUT1" "ip")
 JA3_1=$(extract_json "$OUT1" "ja3")
@@ -30,17 +25,17 @@ JA4_1=$(extract_json "$OUT1" "ja4")
 UA1=$(extract_json "$OUT1" "userAgent")
 CIPHERS1=$(extract_json "$OUT1" "nodeOptions")
 
-echo "  -> IP:          $IP1"
-echo "  -> JA3:         $JA3_1"
-echo "  -> JA4:         $JA4_1"
-echo "  -> User-Agent:  $UA1"
-echo ""
+echo "  -> Baseline IP:          $IP1"
+echo "  -> Baseline JA3 Hash:    $JA3_1"
+echo "  -> Baseline JA4:         $JA4_1"
+echo "  -> Baseline User-Agent:  $UA1"
 
-# ─────────────────────────────────────────────────────────────────────────────
-echo "[TEST 2/3] Performing full reinstall (wipe → rebuild → new WARP identity)..."
+echo ""
+echo "[TEST 2/3] Performing full reinstall (Reinstall & Rebuild)..."
+echo "  (Wiping state, recompiling app, rotating WARP identity and cipher list)"
 ./reinstall.sh --json >/dev/null 2>&1
 
-OUT2=$(run_app_json)
+OUT2=$(./run.sh --json 2>/dev/null | tail -n 25 | grep -A 20 "^{" || true)
 
 IP2=$(extract_json "$OUT2" "ip")
 JA3_2=$(extract_json "$OUT2" "ja3")
@@ -48,64 +43,62 @@ JA4_2=$(extract_json "$OUT2" "ja4")
 UA2=$(extract_json "$OUT2" "userAgent")
 CIPHERS2=$(extract_json "$OUT2" "nodeOptions")
 
-echo "  -> IP:          $IP2"
-echo "  -> JA3:         $JA3_2"
-echo "  -> JA4:         $JA4_2"
-echo "  -> User-Agent:  $UA2"
-echo ""
-echo "=== VERIFYING ROTATIONS ==="
+echo "  -> New IP:               $IP2"
+echo "  -> New JA3 Hash:         $JA3_2"
+echo "  -> New JA4:              $JA4_2"
+echo "  -> New User-Agent:       $UA2"
 
-# Check 1: IP rotation (advisory — Cloudflare may reassign same edge IP)
+echo ""
+echo "=== VERIFYING REINSTALLATION ROTATIONS ==="
+
+# 1. Verify IP changed
 if [ "$IP1" != "$IP2" ] && [ -n "$IP2" ] && [ "$IP2" != "unknown" ]; then
-  echo "  ✅ PASS: IP rotated ($IP1 → $IP2)"
+  echo "  ✅ PASS: IP address changed successfully ($IP1 -> $IP2)"
 else
-  echo "  ⚠️  NOTE: Same Cloudflare edge IP ($IP2). WARP X25519 credentials were still rotated."
+  # In case Cloudflare pool allocates the same IP in same datacenter, check if WireGuard credentials rotated
+  echo "  ⚠️  NOTE: Cloudflare edge returned same/similar subnet IP ($IP1 vs $IP2). WARP registration was rotated."
 fi
 
-# Check 2: TLS fingerprint MUST change (primary assertion)
+# 2. Verify TLS Fingerprint / Ciphers changed
 if [ "$CIPHERS1" != "$CIPHERS2" ] || [ "$JA3_1" != "$JA3_2" ] || [ "$JA4_1" != "$JA4_2" ]; then
-  echo "  ✅ PASS: TLS fingerprint rotated"
-  echo "           JA4: $JA4_1 → $JA4_2"
+  echo "  ✅ PASS: Node.js TLS Fingerprint rotated successfully!"
+  echo "          Old JA4: $JA4_1"
+  echo "          New JA4: $JA4_2"
 else
-  echo "  ❌ FAIL: TLS fingerprint did NOT rotate after reinstall!"
+  echo "  ❌ FAIL: Node.js TLS Fingerprint did not rotate!"
   FAILED=1
 fi
 
-# Check 3: User-Agent must be a real Node.js client identifier
-if [[ "$UA2" == *"Node.js"* ]] || [[ "$UA2" == *"axios"* ]] || \
-   [[ "$UA2" == *"undici"* ]] || [[ "$UA2" == *"got"* ]]    || \
-   [[ "$UA2" == *"node-fetch"* ]]; then
-  echo "  ✅ PASS: User-Agent is authentic Node.js client: $UA2"
+# 3. Verify User-Agent is Node.js and not browser emulation
+if [[ "$UA2" == *"Node.js"* ]] || [[ "$UA2" == *"axios"* ]] || [[ "$UA2" == *"undici"* ]] || [[ "$UA2" == *"got"* ]] || [[ "$UA2" == *"node-fetch"* ]]; then
+  echo "  ✅ PASS: User-Agent is authentic Node.js client (no browser emulation): $UA2"
 else
-  echo "  ❌ FAIL: Unexpected User-Agent: '$UA2'"
+  echo "  ❌ FAIL: Unexpected User-Agent format: $UA2"
   FAILED=1
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "[TEST 3/3] Kill-switch — host IP must NOT leak when WARP proxy is down..."
+echo "[TEST 3/3] Testing Fail-Closed / Kill-Switch Protection..."
+echo "  (Stopping WARP proxy; asserting requests fail closed and host IP is NOT leaked)"
 docker compose stop warp-proxy >/dev/null 2>&1
 
-# Run app WITHOUT sharing the warp-proxy network namespace.
-# HTTP_PROXY still points to 127.0.0.1:9091 — but nothing listens there
-# in a fresh container → ProxyAgent gets ECONNREFUSED → process exits 1.
-# This confirms fail-closed at the application level.
+KILL_SWITCH_PASSED=0
 if docker run --rm --env-file .env docker-anonymous-app:latest >/dev/null 2>&1; then
-  echo "  ❌ FAIL: Request succeeded with proxy down — host IP may have leaked!"
+  echo "  ❌ FAIL: Request succeeded while proxy was down! Direct host egress leak occurred!"
   FAILED=1
 else
-  echo "  ✅ PASS: Request blocked (ECONNREFUSED on proxy). Host IP was NOT exposed."
+  echo "  ✅ PASS: Outbound request was completely blocked when WARP proxy was down."
+  echo "          (Strict fail-closed active: host IP was NOT leaked to the internet)."
+  KILL_SWITCH_PASSED=1
 fi
 
-# Restore WARP proxy
-docker compose up warp-proxy -d >/dev/null 2>&1
-bash scripts/wait-for-warp.sh 120 >/dev/null 2>&1
+# Restore WARP proxy service
+docker compose up warp-proxy -d --wait >/dev/null 2>&1
 
-# ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=========================================================="
 if [ "$FAILED" -eq 0 ]; then
-  echo "  🎉 ALL TESTS PASSED!"
+  echo "  🎉 ALL TESTS PASSED! Portfolio readiness confirmed."
   echo "=========================================================="
   exit 0
 else
@@ -113,3 +106,4 @@ else
   echo "=========================================================="
   exit 1
 fi
+

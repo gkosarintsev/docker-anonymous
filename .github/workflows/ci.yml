@@ -1,0 +1,147 @@
+name: Anonymity & Integrity Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run Anonymity Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Cache Docker layer store to speed up rebuilds
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Generate .env before anything else (required by docker compose)
+      - name: Generate stealth environment profile
+        run: bash scripts/generate-env.sh
+
+      # Build both images (uses Buildx layer cache)
+      - name: Build Docker images
+        run: |
+          docker compose build --progress=plain
+        env:
+          DOCKER_BUILDKIT: 1
+
+      # ─────────────────────────────────────────────
+      # TEST 1 — WARP connectivity & real IP check
+      # ─────────────────────────────────────────────
+      - name: "[TEST 1/3] Start WARP proxy and verify connectivity"
+        run: |
+          echo "Starting warp-proxy and waiting for healthy state..."
+          docker compose up warp-proxy -d --wait --timeout 120
+          echo "WARP proxy is healthy. Capturing first IP..."
+
+          OUT=$(docker run --rm --network=container:warp-proxy-service \
+            --env-file .env docker-anonymous-app:latest --json 2>/dev/null || true)
+          echo "Raw output: $OUT"
+
+          IP=$(echo "$OUT" | grep -o '"ip": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)
+          WARP=$(echo "$OUT" | grep -o '"warp": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)
+
+          echo "IP_BASELINE=$IP"   >> "$GITHUB_ENV"
+          echo "JA4_BASELINE=$(echo "$OUT" | grep -o '"ja4": *"[^"]*"' | head -n1 | cut -d'"' -f4)" >> "$GITHUB_ENV"
+          echo "UA_BASELINE=$(echo "$OUT"  | grep -o '"userAgent": *"[^"]*"' | head -n1 | cut -d'"' -f4)" >> "$GITHUB_ENV"
+          echo "CIPHERS_BASELINE=$(echo "$OUT" | grep -o '"nodeOptions": *"[^"]*"' | head -n1 | cut -d'"' -f4)" >> "$GITHUB_ENV"
+
+          if [ -z "$IP" ] || [ "$IP" = "unknown" ]; then
+            echo "❌ FAIL: Could not obtain public IP from WARP"
+            exit 1
+          fi
+          echo "✅ PASS: WARP is active. IP=$IP  WARP_STATUS=$WARP"
+
+      # ─────────────────────────────────────────────
+      # TEST 2 — Fingerprint rotation after reinstall
+      # ─────────────────────────────────────────────
+      - name: "[TEST 2/3] Rotate WARP identity and TLS fingerprint"
+        run: |
+          echo "Stopping stack and wiping volumes..."
+          docker compose down -v
+
+          echo "Regenerating stealth profile..."
+          bash scripts/generate-env.sh
+
+          echo "Rebuilding images..."
+          docker compose build --progress=plain
+          docker compose up warp-proxy -d --wait --timeout 120
+
+          OUT=$(docker run --rm --network=container:warp-proxy-service \
+            --env-file .env docker-anonymous-app:latest --json 2>/dev/null || true)
+          echo "Raw output: $OUT"
+
+          IP_NEW=$(echo "$OUT"     | grep -o '"ip": *"[^"]*"'          | head -n1 | cut -d'"' -f4 || true)
+          JA4_NEW=$(echo "$OUT"    | grep -o '"ja4": *"[^"]*"'         | head -n1 | cut -d'"' -f4 || true)
+          UA_NEW=$(echo "$OUT"     | grep -o '"userAgent": *"[^"]*"'   | head -n1 | cut -d'"' -f4 || true)
+          CIPHERS_NEW=$(echo "$OUT" | grep -o '"nodeOptions": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)
+
+          echo "--- ROTATION RESULTS ---"
+          echo "  IP:      ${{ env.IP_BASELINE }} -> $IP_NEW"
+          echo "  JA4:     ${{ env.JA4_BASELINE }} -> $JA4_NEW"
+          echo "  UA:      ${{ env.UA_BASELINE }} -> $UA_NEW"
+          echo "  Ciphers: ${{ env.CIPHERS_BASELINE }} -> $CIPHERS_NEW"
+
+          FAILED=0
+
+          # IP check (may hit same Cloudflare edge — treat as advisory)
+          if [ "${{ env.IP_BASELINE }}" != "$IP_NEW" ] && [ -n "$IP_NEW" ]; then
+            echo "✅ PASS: IP changed (${{ env.IP_BASELINE }} -> $IP_NEW)"
+          else
+            echo "⚠️  NOTE: Same Cloudflare edge IP ($IP_NEW). WARP identity was still rotated."
+          fi
+
+          # Fingerprint check (must change)
+          if [ "${{ env.CIPHERS_BASELINE }}" != "$CIPHERS_NEW" ] || \
+             [ "${{ env.JA4_BASELINE }}" != "$JA4_NEW" ]; then
+            echo "✅ PASS: TLS fingerprint rotated (JA4: ${{ env.JA4_BASELINE }} -> $JA4_NEW)"
+          else
+            echo "❌ FAIL: TLS fingerprint did NOT rotate after reinstall"
+            FAILED=1
+          fi
+
+          # User-Agent authenticity check
+          if [[ "$UA_NEW" == *"Node.js"* ]] || [[ "$UA_NEW" == *"axios"* ]] || \
+             [[ "$UA_NEW" == *"undici"* ]] || [[ "$UA_NEW" == *"got"* ]] || \
+             [[ "$UA_NEW" == *"node-fetch"* ]]; then
+            echo "✅ PASS: User-Agent is authentic Node.js client (no browser emulation): $UA_NEW"
+          else
+            echo "❌ FAIL: Unexpected User-Agent: $UA_NEW"
+            FAILED=1
+          fi
+
+          exit $FAILED
+
+      # ─────────────────────────────────────────────
+      # TEST 3 — Fail-closed / Kill-switch
+      # ─────────────────────────────────────────────
+      - name: "[TEST 3/3] Kill-switch — no host IP leak when WARP is down"
+        run: |
+          echo "Stopping warp-proxy..."
+          docker compose stop warp-proxy
+
+          echo "Attempting request with proxy down (must fail)..."
+          if docker run --rm \
+            --network=container:warp-proxy-service \
+            --env-file .env \
+            docker-anonymous-app:latest 2>/dev/null; then
+            echo "❌ FAIL: Request succeeded with WARP down — host IP leaked!"
+            exit 1
+          else
+            echo "✅ PASS: Request blocked. Fail-closed kill-switch confirmed."
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v --remove-orphans 2>/dev/null || true

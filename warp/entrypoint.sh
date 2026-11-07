@@ -42,6 +42,10 @@ else
     reserved=$(printf '%s' "$CF_CLIENT_ID" | base64 -d | od -An -v -t u1 | \
         jq -s 'if length == 3 then . else error("WARP client_id must contain exactly three bytes") end')
 
+    # Save identity metadata for verification
+    jq -n --arg local_key "$CF_LOCAL_KEY" --arg client_id "$CF_CLIENT_ID" --arg ipv4 "$CF_ADDR_V4" \
+        '{local_key: $local_key, client_id: $client_id, internal_ipv4: $ipv4}' > /etc/sing-box/identity.json
+
     echo "[warp] Registration successful! Assigned IPv4: $CF_ADDR_V4"
 
     jq -n \

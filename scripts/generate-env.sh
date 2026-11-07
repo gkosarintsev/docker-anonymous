@@ -45,8 +45,9 @@ SELECTED_UA="${USER_AGENTS[$((RANDOM % ${#USER_AGENTS[@]}))]}"
 # 3. Machine ID
 MACHINE_ID=$(openssl rand -hex 16)
 
-# 4. Cloudflare WARP Gateway Endpoint
-WARP_SERVER="${WARP_SERVER:-162.159.192.1}"
+# 4. Cloudflare WARP Gateway Endpoint (Randomly selected from verified Anycast gateways)
+WARP_SERVERS=("162.159.192.1" "188.114.96.1" "188.114.97.1")
+WARP_SERVER="${WARP_SERVER:-${WARP_SERVERS[$((RANDOM % ${#WARP_SERVERS[@]}))]}}"
 WARP_PORT="2408"
 
 # 5. Write .env

@@ -80,17 +80,28 @@ else
 fi
 
 # Check 3: External IP Address MUST rotate
-# If Cloudflare edge returned the exact same NAT IP, re-register for a new NAT allocation
+# If Cloudflare edge returned the exact same NAT IP, cycle to alternative Cloudflare WARP endpoints
 if [ "$IP1" = "$IP2" ]; then
-  echo "  [*] Edge allocated same IP ($IP1). Re-registering for fresh lease..."
-  for attempt in 1 2 3; do
+  echo "  [*] Edge allocated same IP ($IP1). Cycling to alternative Cloudflare WARP Anycast endpoints..."
+  for server in "188.114.96.1" "188.114.97.1" "188.114.98.1" "188.114.99.1" "162.159.195.1" "162.159.192.1"; do
+    CURRENT_SERVER=$(grep '^WARP_SERVER=' .env 2>/dev/null | cut -d'=' -f2 || echo "")
+    if [ "$server" = "$CURRENT_SERVER" ]; then
+      continue
+    fi
+    echo "      Trying Anycast gateway: $server:2408 ..."
+    sed -i "s/^WARP_SERVER=.*/WARP_SERVER=$server/" .env
     docker compose down -v >/dev/null 2>&1
     docker compose up warp-proxy -d >/dev/null 2>&1
-    bash scripts/wait-for-warp.sh 45 >/dev/null 2>&1
-    OUT_ROT=$(run_app_json)
-    IP2=$(extract_json "$OUT_ROT" "ip")
-    if [ "$IP1" != "$IP2" ] && [ -n "$IP2" ] && [ "$IP2" != "unknown" ]; then
-      break
+    if bash scripts/wait-for-warp.sh 35 >/dev/null 2>&1; then
+      OUT_ROT=$(run_app_json)
+      IP_CANDIDATE=$(extract_json "$OUT_ROT" "ip")
+      if [ -n "$IP_CANDIDATE" ] && [ "$IP_CANDIDATE" != "unknown" ]; then
+        if [ "$IP1" != "$IP_CANDIDATE" ]; then
+          IP2="$IP_CANDIDATE"
+          echo "      Successfully acquired distinct exit IP: $IP2"
+          break
+        fi
+      fi
     fi
   done
 fi

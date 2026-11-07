@@ -1,0 +1,28 @@
+{
+  "name": "docker-anonymous",
+  "version": "1.0.0",
+  "description": "Stealth Node.js console application protected against fingerprinting and routed via Cloudflare WARP with fail-closed security",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "node dist/index.js --test"
+  },
+  "keywords": [
+    "nodejs",
+    "anti-fingerprint",
+    "stealth",
+    "cloudflare-warp",
+    "fail-closed",
+    "docker"
+  ],
+  "author": "Portfolio Project",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "undici": "^8.12.4"
+  }
+}

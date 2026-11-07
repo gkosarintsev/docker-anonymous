@@ -1,0 +1,40 @@
+services:
+  # Cloudflare WARP proxy service
+  warp-proxy:
+    build:
+      context: ./warp
+      dockerfile: Dockerfile
+    image: docker-anonymous-warp:latest
+    container_name: warp-proxy-service
+    network_mode: bridge
+    restart: unless-stopped
+    volumes:
+      - warp-data:/etc/sing-box
+    environment:
+      - WARP_SERVER=162.159.192.1
+      - WARP_PORT=2408
+      - NET_PORT=9091
+      - WARP_MTU=1200
+    healthcheck:
+      test: ["CMD-SHELL", "curl -4 -s -f -x http://127.0.0.1:9091 --max-time 3 https://cloudflare.com/cdn-cgi/trace >/dev/null 2>&1 || exit 1"]
+      interval: 4s
+      timeout: 4s
+      retries: 10
+      start_period: 3s
+
+  # Minimal Node.js console application
+  node-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: docker-anonymous-app:latest
+    container_name: node-anonymous-app
+    network_mode: service:warp-proxy
+    depends_on:
+      warp-proxy:
+        condition: service_healthy
+    env_file:
+      - .env
+
+volumes:
+  warp-data:
